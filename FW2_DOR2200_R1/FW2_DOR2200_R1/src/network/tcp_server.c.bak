@@ -1,0 +1,346 @@
+/*****************************************************************************
+*                       Copyright (c)
+*              Avon Building Solutions Pvt Ltd
+*                   All RIGTHS RESERVED.
+*
+* Module Name	: tcp_server.c
+* Created By	: Ranjitkumar Ainapure.
+* Created Date	: 08/11/2023.
+* Module
+* Description	:
+*
+* Controller	: 	ATSAM4E16CA-AUR
+*					1024 KB		Flash.
+*					128 KB		RAM.
+*
+* REVISION HISTORY
+* Version		: 1.0
+* Revision Date	: 08/11/2023.
+* Changes		: NA.
+*****************************************************************************/
+#include <string.h>
+//#include "task_defs.h"
+#include "stdio_serial.h"
+#include "ethernet.h"
+#include "sysclk.h"
+#include "lwip/opt.h"
+#include "lwip/tcpip.h"
+#include "tc.h"
+
+#include "lwip/stats.h"
+#include "user_uart.h"
+#include "user_timer.h"
+#include "rs485_uart.h"
+#include "rs485_driver.h"
+#include "debug_application.h"
+#include "tcp_server.h"
+#include "user_rtos.h"
+#include "app_utility.h"
+#include "config_mode.h"
+
+
+/***** Function Prototypes *****/
+static void TCP_IP_Server(void *pvParameters);
+static void TCP_Server_Receive(void *pvParameters);
+static void TCP_Server_Reply(void *pvParameters);
+
+/***** Global Function Prototypes *****/
+extern void Validate_Modbus_Frame(void);
+extern void config_mode(void *pvParameters);
+
+/***** Variables *****/
+U8 gb_mbTcp_rcv_buf[RCV_NUM_OF_CHR] = {0};
+U16 gb_mbTCP_rcvbuf_len = 0;
+U8 gb_mbTCP_rcvd_f = 0;
+	
+U8 gb_mbTcp_tx_buf[TX_NUM_OF_CHR] = {0};
+U8 gb_mbTCP_txbuf_len = 0;
+U8 gb_mbTCP_tx_f = 0;
+
+U8 gb_conn_closed = 0;
+
+/***** Extern Variables *****/
+extern U8 gb_send_buf[100];
+extern U8 gb_send_len;
+extern U8 gb_mbTCP_send_flg;
+
+#if LWIP_STATS
+/** Used to compute LwIP bandwidth */
+extern uint32_t lwip_tx_count;
+extern uint32_t lwip_rx_count;
+extern uint32_t lwip_tx_rate;
+extern uint32_t lwip_rx_rate;
+#endif
+
+
+#if LWIP_STATS
+// TC3 means TC1 channel 0.
+void TC3_Handler(void)
+{
+	if ((tc_get_status(TC1, 0) & TC_SR_CPCS) == TC_SR_CPCS) {
+		lwip_tx_rate = lwip_tx_count;
+		lwip_rx_rate = lwip_rx_count;
+		lwip_tx_count = 0;
+		lwip_rx_count = 0;
+	}
+}
+
+/**
+ * \brief Enable TC1 channel 0 to trigger each second to compute GMAC stats.
+ */
+static void configure_timer_for_bandwidth_stats(void)
+{
+	pmc_enable_periph_clk(ID_TC3);		// Warning TC number is the channel not TC number.
+										// Hence TC3 means TC1 channel 0.
+	tc_init(TC1, 0,						// Init timer counter 1 channel 0.
+			TC_CMR_WAVE |				// Waveform Mode is enabled.
+			TC_CMR_CPCTRG |				// UP mode with automatic trigger on RC Compare
+			TC_CMR_TCCLKS_TIMER_CLOCK5	// Use slow clock to avoid overflow.
+	);
+
+	tc_write_rc(TC1, 0, 32768);			// Load the highest possible value into TC.
+
+	/* Configure TC interrupts for TC TC_CHANNEL_CAPTURE only */
+	NVIC_SetPriority(TC3_IRQn, 0);		// TC3 means TC1 channel 0.
+	NVIC_EnableIRQ(TC3_IRQn);			// TC3 means TC1 channel 0.
+	tc_enable_interrupt(TC1, 0, TC_IER_CPCS);
+	tc_start(TC1, 0);					// Start Timer counter 0 channel 0.
+}
+#endif
+
+/*****************************************************************************
+* Function name	: void Create_TCP_Server_Task(void)
+* Returns		: nothing.
+* Arguments    	: None.
+* Created by	: Ranjitkumar Ainapure.
+* Date created	: 08/11/2023.
+*
+* Description	: Create a task to receive the tcp data.
+*				  stack size and priority is assigned.
+*               :
+* Notes			: NA
+* Global Variables Affected : NA.
+*****************************************************************************/
+void Create_TCP_Server_Task(void)
+{
+	/* Create the TCP-IP Server Task. */
+	xTaskCreate(TCP_IP_Server, (const signed char *const) "TCP_IP_Server",
+			mainTCP_TASK_STACK_SIZE, NULL, mainTCP_TASK_PRIORITY+2, NULL);
+	 /* Create the TCP-IP Server Task. */
+	 xTaskCreate(config_mode, (const signed char *const) "CONFIG_MODE",
+	 mainTCP_TASK_STACK_SIZE, NULL, mainTCP_TASK_PRIORITY+2, NULL);
+}
+
+/*****************************************************************************
+* Function name	: static void TCP_IP_Server(void *pvParameters)
+* Returns		: nothing.
+* Arguments    	: void *pvParameters (Holds the pointer)
+* Created by	: Ranjitkumar Ainapure.
+* Date created	: 08/11/2023.
+*
+* Description	: Configure the TCP-IP server. using Netconn API.
+*               :
+* Notes			: NA
+* Global Variables Affected : NA.
+*****************************************************************************/
+static void TCP_IP_Server(void *pvParameters)
+{
+	struct netconn *conn;
+	struct netconn *newconn;
+	err_t err;
+	
+	/* Just to avoid compiler warnings. */
+	UNUSED(pvParameters);
+
+#if LWIP_STATS
+	configure_timer_for_bandwidth_stats();
+#endif
+
+	/* Create a new TCP connection handle */
+	conn = netconn_new(NETCONN_TCP);
+	if (conn == NULL)
+	{
+		printf("http_task: invalid conn\n");
+		
+				
+		/* Delete the calling task. */
+		vTaskDelete(NULL);
+	}
+
+	/* Bind to port 80 (HTTP) with default IP address */
+	netconn_bind(conn, NULL, 502);	// 80
+
+	/* Put the connection into LISTEN state */
+	netconn_listen(conn);
+
+	do {
+		err = netconn_accept(conn, &newconn);
+		if (err == ERR_OK)
+		{
+			#if DEBUG_ALL || DEBUG_TCP_IP
+			while (!gb_uart_ready_f);
+			Print_Message("\nConnection Established.");
+			#endif
+			
+			if (NULL == sys_thread_new("tcp_receive", TCP_Server_Receive, newconn,
+					mainTCP_TASK_STACK_SIZE, mainTCP_TASK_PRIORITY))
+			{
+				/* Failed to instanciate task, free netconn socket. */
+				netconn_close(newconn);
+				netconn_delete(newconn);
+			}
+		}
+				
+		vTaskDelay(1);
+	} while (err == ERR_OK);
+
+	printf("http_task: netconn_accept received error %d, shutting down\n", err);
+
+	/* Free Netconn resource. */
+	netconn_close(conn);
+	netconn_delete(conn);
+
+	/* Delete the calling task. */
+	vTaskDelete(NULL);
+}
+
+/*****************************************************************************
+* Function name	: static void TCP_Server_Receive(void *pvParameters)
+* Returns		: nothing.
+* Arguments    	: void *pvParameters (Holds the pointer)
+* Created by	: Ranjitkumar Ainapure.
+* Date created	: 08/11/2023.
+*
+* Description	: Once established the tcp server connection, then receive
+*				  the data over tcp here in this function.
+*               :
+* Notes			: NA
+* Global Variables Affected : NA.
+*****************************************************************************/
+static void TCP_Server_Receive(void *pvParameters)
+{
+	struct netconn *conn;
+	struct netbuf *inbuf;
+	char *buf;
+	u16_t buflen;
+	err_t err;
+	
+	conn = pvParameters;
+	
+	/* Read the data from the port, blocking if nothing yet there. */
+	/* We assume the request is in one netbuf. */
+	while (1)
+	{
+		err = netconn_recv(conn, &inbuf);
+		if (err == ERR_OK)
+		{
+			/* Attempt to take the semaphore (wait for it to be available) */
+			if (xSemaphoreTake(xSemaphore, portMAX_DELAY))
+			{
+				/* Access the shared resource or perform some critical section */
+				/* Read data from netbuf to the provided buffer. */
+				netbuf_data(inbuf, (void**)&buf, &buflen);
+				
+				memcpy(gb_mbTcp_rcv_buf, buf, buflen);	/* copy the received frame data. */
+				//netconn_write(conn, buf, buflen, NETCONN_COPY);
+				
+				gb_mbTCP_rcvbuf_len = buflen;	/* Copy the received length of the buffer. */
+				gb_mbTCP_rcvd_f = 1;	/* Set the flag once received the data. */
+				
+				validate_utility_frame();
+				netconn_write(conn, utility_tx.frame_buf, utility_tx.frame_len, NETCONN_COPY);
+ 				//Validate_Modbus_Frame();	/* Call this function to validate the frame and build appropriate response frame */
+ 				/* Put data on TCP line */
+				//netconn_write(conn, gb_mbTcp_tx_buf, gb_mbTCP_txbuf_len, NETCONN_COPY);
+				
+				/* Delete the buffer (netconn_recv gives us ownership, */
+				/* so we have to make sure to deallocate the buffer). */
+				netbuf_delete(inbuf);
+				
+				/* Release the semaphore when done with the critical section */
+				xSemaphoreGive(xSemaphore);
+			}
+		}
+		else if (err == ERR_CLSD)
+		{
+			/* If connection closed */
+			gb_conn_closed = 1;
+			
+			#if DEBUG_ALL || DEBUG_TCP_IP
+			while (!gb_uart_ready_f);
+			Print_Message("\nConnection Closed.");
+			#endif
+			
+			/* Free resource. */
+			netconn_delete(conn);
+			
+			/* Delete the calling task. */
+			vTaskDelete(NULL);
+		}
+		
+		
+		/* Close the connection (server closes in HTTP). */
+		//netconn_close(conn);
+
+		/* Delete the buffer (netconn_recv gives us ownership, */
+		/* so we have to make sure to deallocate the buffer). */
+		//netbuf_delete(inbuf);
+
+		/* Free resource. */
+		//netconn_delete(conn);
+
+		/* Delete the calling task. */
+		//vTaskDelete(NULL);
+		
+		vTaskDelay(1);
+	}
+}
+
+/*****************************************************************************
+* Function name	: static void TCP_Server_Reply(void *pvParameters)
+* Returns		: nothing.
+* Arguments    	: void *pvParameters (Holds the pointer)
+* Created by	: Ranjitkumar Ainapure.
+* Date created	: 08/11/2023.
+*
+* Description	: Once established the tcp server then reply the data over
+*				  tcp here in this function.
+*               :
+* Notes			: NA
+* Global Variables Affected : NA.
+*****************************************************************************/
+static void TCP_Server_Reply(void *pvParameters)
+{
+	struct netconn *conn;
+	struct netbuf *inbuf;
+
+	conn = pvParameters;
+
+	/* Read the data from the port, blocking if nothing yet there. */
+	/* We assume the request is in one netbuf. */
+	while (1)
+	{		
+		if (gb_mbTCP_send_flg == 1)
+		{	
+			/* Attempt to take the semaphore (wait for it to be available) */
+			if (xSemaphoreTake(xSemaphore, portMAX_DELAY))
+			{
+				gb_mbTCP_send_flg = 0;
+				
+				U8 isErr;
+				isErr = netconn_write(conn, gb_send_buf, gb_send_len, NETCONN_COPY);
+							
+				memset(gb_send_buf, 0, gb_send_len);
+			
+				/* Release the semaphore when done with the critical section */
+				xSemaphoreGive(xSemaphore);
+			}
+		}
+		else
+		{
+			// Error occurred.
+		}
+		
+		vTaskDelay(1);
+	}
+}

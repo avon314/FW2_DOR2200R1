@@ -1,0 +1,76 @@
+/*****************************************************************************
+*                       Copyright (c)
+*              Avon Building Solutions Pvt Ltd
+*                   All RIGTHS RESERVED.
+*
+* Module Name	: app_utility.h
+* Created By	: Harshit Agnihotri.
+* Created Date	: 28/12/2023.
+* Module
+* Description	: Header file for app_utility.c.
+		       Defines constants and macros for app_utility.c.
+*
+* REVISION HISTORY
+* Version		: 1.0
+* Revision Date: 28/11/2023.
+* Changes		: NA.
+*****************************************************************************/
+
+#ifndef APP_UTILITY_H_
+#define APP_UTILITY_H_
+
+/***** Macro definitions *****/
+#define UTLTY_FRM_MX_SZ (0x01B3)
+#define SOF (0x23)
+#define EOF (0x24)
+#define DST_ADDR_RX (0x02)
+#define SRC_ADDR_RX (0x01)
+#define DST_ADDR_TX (0x01)
+#define SRC_ADDR_TX (0x02)
+#define ERROR_BYTE (0x00)
+
+
+#define READ_MFG_IFO (0x01)
+#define READ_GRP_CONFIG (0x02)
+#define WRITE_GRP_CONFIG (0x03)
+#define READ_IP_CONFIG (0X04)
+#define WRITE_IP_CONFIG (0x05)
+#define READ_OP_CONFIG (0X06)
+#define WRITE_OP_CONFIG (0x07)
+#define READ_DOOR_CONFIG (0x08)
+#define WRITE_DOOR_CONFIG (0x09)
+#define READ_PRIVACY_CONFIG (0x0A)
+#define WRITE_PRIVACY_CONFIG (0x0B)
+#define READ_COMN_CONFIG (0x80)
+#define WRITE_COMN_CONFIG (0x81)
+#define CONNECT_WITH_DEVICE (0X82)
+
+extern U8 gb_utility_rcv_f;   // Global flag indicating the reception of a utility frame.
+extern volatile U8 gb_op_config_cplt;   // Flag indicating completion of output configuration.
+extern volatile U8 gb_conn_dvc_f;       // Flag to indicate connect with device successful.
+
+
+#define COMBINE_BYTES(hb, lb) (((U16)(hb) << 8) | (U16)(lb))     // Macro to combine two bytes into a 16-bit value.
+// Macro to split a 16-bit value into two bytes.
+#define SPLIT_BYTES(cb, hb, lb) \
+do { \
+     hb = (U8)((cb) >> 8); \
+     lb = (U8)(cb); \
+} while (0)
+
+// Definition of a structure representing a utility frame.
+typedef struct
+{
+     U8 frame_buf[UTLTY_FRM_MX_SZ];     // Buffer to hold the frame data.
+     U8 frame_funid;                    // Function ID within the frame.
+     U16 frame_len;                     // Length of the frame.
+}Utility;
+
+// Declaration of global instances of the Utility structure for receiving and transmitting frames.
+extern Utility utility_rx;
+extern Utility utility_tx;
+
+/***** Function Declarations / Prototypes *****/
+void validate_utility_frame(void);
+
+#endif /* APP_UTILITY_H_ */
