@@ -78,9 +78,12 @@
 
 typedef struct
 {
+	/*	gb_poll_flag and gb_frame_not_rcvd_f are written from the 1 ms timer ISR.
+		They must not share storage with the bit fields below, which the tasks
+		update with read-modify-write; otherwise an ISR update can be lost. */
+	volatile U8 gb_poll_flag;			/* Flag used to check poll flag is set or not */
+	volatile U8 gb_frame_not_rcvd_f;	/* Flag used if frame is not received within defined frame receive time. */
 	U8 gb_enable_poll : 1;		/* Flag variable used to enable or disable polling */
-	U8 gb_poll_flag : 1;		/* Flag used to check poll flag is set or not */
-	U8 gb_frame_not_rcvd_f : 1;	/* Flag used if frame is not received within defined frame receive time. */
 	U8 gb_retry_f : 1;			/* Flag used to set retry frame */
 	U8 gb_transmit_f : 1;		/* Flag used to send data over the osdp protocol */
 	U8 gb_rd_oprt_state_f : 1;	/* Flag used to read operational state value of slaves */

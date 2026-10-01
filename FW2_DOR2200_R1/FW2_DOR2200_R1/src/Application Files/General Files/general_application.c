@@ -61,6 +61,7 @@ Structure definitions.
 GEN_MEM handle_mem;
 
 extern U8 gb_device_power_on;
+extern xSemaphoreHandle xSemaphore;
 
 /*****************************************************************************
 * Function name	: void General_Task(void)
@@ -82,6 +83,12 @@ void General_Task(void *pvParameters)
 	{
 		wdt_restart(WDT);	// Restart the watch dog timer. Otherwise controller will restart.
 		
+		/*	The interlock state (iflags, iDeviceFlag, iLock, osdp_app, slv_data) is
+			shared with OSDP_Transmit_Task and OSDP_Receive_Task, which hold
+			xSemaphore while they use it. This task has a higher priority and
+			used to pre-empt them in the middle of an update. */
+		if (xSemaphoreTake(xSemaphore, portMAX_DELAY))
+		{
 		if (gb_config_mode_f == FALSE)
 		{
 			if (gb_device_power_on == FLAG_SET)
@@ -149,6 +156,8 @@ void General_Task(void *pvParameters)
 			Master_General_Purpose_Mem_Handling();	/*Store operation state at the eeprom.*/
 			Handle_Master_PowerOn_State();			/*Manages device's operation state if matser power resets*/
 			Reset_devNoResponse_flags();
+		}
+		xSemaphoreGive(xSemaphore);
 		}
 		vTaskDelay(1);
 	}

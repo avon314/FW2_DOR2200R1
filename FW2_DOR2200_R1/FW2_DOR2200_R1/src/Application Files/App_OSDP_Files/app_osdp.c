@@ -586,6 +586,15 @@ void OSDP_Receive_Task(void *pvParameters)
 					osdp_app.gb_retry_count = 0;
 					Select_Command_transmission();	/* Select next command to transmit */
 				}
+				
+				if ((osdp_app.gb_retry_f == FLAG_SET) || (osdp_app.gb_frame_not_rcvd_f == FLAG_SET))
+				{
+					/*	The reply came just after the reply timeout. Do not resend the
+						frame: a second ACK of the same command would be counted twice. */
+					osdp_app.gb_frame_not_rcvd_f = FLAG_RST;
+					osdp_app.gb_retry_f = FLAG_RST;
+					Select_Command_transmission();
+				}
 			}
 			else if (gb_osdp.crc_error_f == TRUE)
 			{
@@ -617,6 +626,14 @@ void OSDP_Receive_Task(void *pvParameters)
 		
 		
 			/*********************** Get Data ********************/
+			/*	A reply belongs to the running command sequence only if it comes from
+				the device the last command was sent to and that command was not a
+				poll. Poll replies (ACK / ISTATR from any door) must not be counted as
+				command acknowledgements, otherwise a sequence advances early and the
+				next ACK is credited to the wrong door. */
+			U8 lcl_cmd_reply = ((gb_last_tx_cmd != CMD_OSDP_POLL)
+								&& (gb_osdp.rec_dev_address == osdp_app.last_dev_address));
+			
 			if (gb_osdp.nack_f == FLAG_SET)
 			{
 				gb_osdp.nack_f = FLAG_RST;
@@ -627,7 +644,11 @@ void OSDP_Receive_Task(void *pvParameters)
 			{
 				gb_osdp.ack_f = FLAG_RST;
 			
-				if (emgGroup.chkEmgAckFlag == FLAG_SET)
+				if (lcl_cmd_reply == FLAG_RST)
+				{
+					/* ACK to a poll, or from a device no command was sent to: not part of a sequence. */
+				}
+				else if (emgGroup.chkEmgAckFlag == FLAG_SET)
 				{
 					// Increment the emergency acknowledgment index
 					osdp_app.emgAckIdx ++;
@@ -849,13 +870,19 @@ void OSDP_Receive_Task(void *pvParameters)
 					if (iDeviceFlag[dvIdx].door_req_flag == FLAG_SET)
 					{
 						iDeviceFlag[dvIdx].chk_slvdrActive_state = FLAG_SET;
+						iDeviceFlag[dvIdx].doorActiveState = FLAG_RST;
 						iDeviceFlag[dvIdx].executing_dr_request_f = 0;
-						osdp_app.gb_enable_poll = 1;
 					
 						#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 						Print_Message("\nCheck for slave 'Door-Active-State' of sAddress : ");
 						Print_Number(gb_osdp.rec_dev_address);
 						#endif
+						
+						/*	The slave ACKs OSDP_OUT even when it refuses to release (e.g. it
+							is in interlock). Read its operational state to confirm that the
+							release cycle really started. The door request sequence ends
+							when this read completes. */
+						Start_Release_Cycle_Check(gb_osdp.rec_dev_address);
 					}
 					else
 					{
@@ -865,6 +892,7 @@ void OSDP_Receive_Task(void *pvParameters)
 						#endif
 					
 						osdp_app.gb_enable_poll = 1;
+						iflags.command_in_process = FLAG_RST;	/* DRT OSDP_OUT sequence is complete. */
 						iDeviceFlag[dvIdx].chk_for_next_door_close = FLAG_SET;
 						iDeviceFlag[dvIdx].chk_slvdrActive_state = FLAG_SET;
 					}
@@ -880,6 +908,7 @@ void OSDP_Receive_Task(void *pvParameters)
 					{
 						osdp_app.outAckIdx = 0;
 						iflags.chk_drt_osdp_out_ack = FLAG_RST;
+						iflags.command_in_process = FLAG_RST;	/* DRT OSDP_OUT sequence is complete. */
 					
 						#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 						Print_Message("\nOSDP_OUT ack received from devices.");
@@ -919,7 +948,8 @@ void OSDP_Receive_Task(void *pvParameters)
 					Reset_Input_ILock_Flags();
 				}
 			
-				if (iflags.chk_opt_sts_ack == FLAG_SET)
+				if ((iflags.chk_opt_sts_ack == FLAG_SET)
+				&& (lcl_cmd_reply == FLAG_SET) && (gb_last_tx_cmd == CMD_OSDP_READ_OP_STATE))
 				{
 					osdp_app.oprRecIdx ++;
 					if (osdp_app.oprRecIdx >= iLock.tx_length)
@@ -959,7 +989,8 @@ void OSDP_Receive_Task(void *pvParameters)
 
 				Send_Slave_Status_Modbus(dvIdx);
 			
-				if (iflags.chk_ip_sts_ack == FLAG_SET)
+				if ((iflags.chk_ip_sts_ack == FLAG_SET)
+				&& (lcl_cmd_reply == FLAG_SET) && (gb_last_tx_cmd == CMD_OSDP_ISTAT))
 				{
 					osdp_app.istRecIdx ++;
 					if (osdp_app.istRecIdx >= iLock.tx_length)
@@ -1184,47 +1215,42 @@ U8 Find_Device_Index_InSystem(U8 dev_address)
 *****************************************************************************/
 void Check_Door_Active_State(U8 rvidx)
 {
+	U8 lcl_addr = inSysDeviceList[rvidx].slv_addr;
+	
+	/*	Note: this runs for every ISTATR, including replies that arrive while
+		another door's command sequence is in progress. It must not change
+		iflags.command_in_process or iLock.actionSlave, which belong to that
+		sequence. */
 	if ((iDeviceFlag[rvidx].chk_slvdrActive_state == FLAG_SET) && (iDeviceFlag[rvidx].door_req_flag == FLAG_SET))
 	{
 		if (slv_data[rvidx].lockState == UNLOCKED)
 		{
 			#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 			Print_Message("\nDoor active state of sAddress ");
-			Print_Number(inSysDeviceList[rvidx].slv_addr);
+			Print_Number(lcl_addr);
 			Print_Message(" is activated.");
 			#endif
 			
 			iDeviceFlag[rvidx].doorActiveState = FLAG_SET;
-			iflags.command_in_process = FLAG_RST;
-			U8 grpIdx = Find_Device_Group(inSysDeviceList[rvidx].slv_addr);
-			grpData[grpIdx].command_executing_f = FLAG_RST;
-			
 		}
-		else if ((slv_data[rvidx].lockState == LOCKED) && ((slv_data[rvidx].doorState == CLOSED)))
+		else if ((slv_data[rvidx].lockState == LOCKED) && (slv_data[rvidx].doorState == CLOSED)
+		&& (iDeviceFlag[rvidx].doorActiveState == FLAG_SET))
 		{
+			/* The door was seen unlocked and is now closed and locked: release cycle is over. */
 			#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 			Print_Message("\nDoor active state of sAddress ");
-			Print_Number(gb_osdp.rec_dev_address);
+			Print_Number(lcl_addr);
 			Print_Message(" is de activated.");
 			#endif
 			
-			iDeviceFlag[rvidx].chk_slvdrActive_state = FLAG_RST;
-			iDeviceFlag[rvidx].door_req_flag = FLAG_RST;
-			iDeviceFlag[rvidx].doorActiveState = FLAG_RST;
-						
-			iLock.actionSlave = gb_osdp.rec_dev_address;
-			
-			#if DEBUG_ALL || DEBUG_APP_OSDP_RX
-			Print_Message("\nStart ITD timer for sAddress : ");
-			Print_Number(iLock.actionSlave);
-			#endif
-			
-			iflags.chk_itd_time_value = FLAG_RST;
-			osdp_app.gb_enable_poll = 1;
-			
-			iDeviceFlag[rvidx].start_itd_time = FLAG_SET;
-			iDeviceFlag[rvidx].itd_timer_running = FLAG_SET;
-			iLockDevice[rvidx].itdCounts = 0;
+			End_Release_Cycle(rvidx);
+		}
+		else
+		{
+			/*	Closed and locked, but the unlock was never reported: the slave may
+				still be in ETD, or the unlock report was lost. Ending the cycle here
+				would start ITD early and normalise the group while this door is
+				still released. The periodic op-state check decides instead. */
 		}
 	}
 	else if ((iDeviceFlag[rvidx].chk_for_next_door_close == FLAG_SET)
@@ -1234,12 +1260,11 @@ void Check_Door_Active_State(U8 rvidx)
 		{
 			#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 			Print_Message("\nDoor active state of sAddress ");
-			Print_Number(inSysDeviceList[rvidx].slv_addr);
+			Print_Number(lcl_addr);
 			Print_Message(" is activated.");
 			#endif
 			
 			iDeviceFlag[rvidx].doorActiveState = FLAG_SET;
-			iflags.command_in_process = FLAG_RST;
 		}
 		else if ((slv_data[rvidx].lockState == LOCKED) && ((slv_data[rvidx].doorState == CLOSED)))
 		{
@@ -1251,7 +1276,7 @@ void Check_Door_Active_State(U8 rvidx)
 			{
 				#if DEBUG_ALL || DEBUG_APP_OSDP_RX
 				Print_Message("\nDoor active state of sAddress ");
-				Print_Number(gb_osdp.rec_dev_address);
+				Print_Number(lcl_addr);
 				Print_Message(" is de activated.");
 				#endif
 				
@@ -1259,7 +1284,7 @@ void Check_Door_Active_State(U8 rvidx)
 				iDeviceFlag[rvidx].doorActiveState = FLAG_RST;
 				iDeviceFlag[rvidx].chk_for_next_door_close = FLAG_RST;
 				
-				iLock.tx_address[0] = gb_osdp.rec_dev_address;
+				iLock.tx_address[0] = lcl_addr;
 				iLock.tx_length = 1;
 				Set_Flags_Put_Into_Normal(0);
 			}

@@ -34,6 +34,8 @@
 #include "general_application.h"
 
 /***** Macro definitions *****/
+#define DOOR_REQ_HOLD_MS		(3000)	/* A door request waits at most this long for the bus to be free. */
+#define REL_CYCLE_CHECK_MS		(5000)	/* Period of the op-state check of a door in its release cycle. */
 
 
 /* Structure Variables */
@@ -48,6 +50,17 @@ ILCK iLock;
 ILCK iLockDevice[TOTAL_SLAVES];
 IP_CNTRL ip_control;
 MBFLAGS mbGetFlags[TOTAL_SLAVES];
+
+/* Door requests received while another command sequence was running. */
+static U8 doorReqPending[TOTAL_SLAVES];
+static portTickType doorReqTick[TOTAL_SLAVES];
+/* Time of the last op-state check of a door in its release cycle. */
+static portTickType relCheckTick[TOTAL_SLAVES];
+
+static void Latch_Door_Request(U8 slvAddress);
+static void Serve_Door_Requests(void);
+static void Supervise_Release_Cycles(void);
+static void Check_Release_Cycle_Result(void);
 
 /*****************************************************************************
 * Function name	: U8 Find_Device_Group(U8 devAddress)
@@ -216,8 +229,7 @@ void Process_Interlocking(void)
 		Print_Number(gb_osdp.rec_dev_address);
 		#endif
 		
-		/* Call below function to take action if door in normal state */
-		Get_Door_Access(gb_osdp.rec_dev_address);
+		Latch_Door_Request(gb_osdp.rec_dev_address);
 	}
 	else if ((gb_osdp_dr_release_f == FLAG_SET))
 	{
@@ -228,8 +240,7 @@ void Process_Interlocking(void)
 		Print_Number(gb_osdp.rec_dev_address);
 		#endif
 		
-		/* Call below function to take action if door in normal state */
-		Get_Door_Access(gb_osdp.rec_dev_address);
+		Latch_Door_Request(gb_osdp.rec_dev_address);
 	}
 	else if ((gb_osdp_rfid_rec_f == FLAG_SET))
 	{
@@ -240,8 +251,7 @@ void Process_Interlocking(void)
 		Print_Number(gb_osdp.rec_dev_address);
 		#endif
 		
-		/* Call below function to take action if door in normal state */
-		Get_Door_Access(gb_osdp.rec_dev_address);
+		Latch_Door_Request(gb_osdp.rec_dev_address);
 	}
 	
 	
@@ -276,7 +286,15 @@ void Process_Interlocking(void)
 		}
 	}
 	
-	if (iflags.opt_sts_read_success == FLAG_SET)
+	if ((iflags.opt_sts_read_success == FLAG_SET) && (iflags.chk_rel_cycle_f == FLAG_SET))
+	{
+		iflags.opt_sts_read_success = FLAG_RST;
+		iflags.chk_rel_cycle_f = FLAG_RST;
+		
+		/* Op-state of a released door was read: confirm or end its release cycle. */
+		Check_Release_Cycle_Result();
+	}
+	else if (iflags.opt_sts_read_success == FLAG_SET)
 	{
 		iflags.opt_sts_read_success = FLAG_RST;
 		/* After successful completion of read operational status */
@@ -316,6 +334,24 @@ void Process_Interlocking(void)
 		
 		U8 lclDevIdx = 0;
 		lclDevIdx = Find_Device_Index_InSystem(iLock.actionSlave);
+		
+		/* Is this the status read of a door request (Get_Door_Access)? */
+		U8 lcl_door_req_f = ((iDeviceFlag[lclDevIdx].executing_dr_request_f == FLAG_SET)
+							&& (iDeviceFlag[lclDevIdx].door_req_flag == FLAG_SET));
+		
+		if ((lcl_door_req_f == FLAG_SET) && (slv_data[lclDevIdx].oprtState != SLV_OP_STATE_NORMAL))
+		{
+			/*	The requesting door itself is no longer Normal (e.g. it was put in
+				interlock by another door after it sent the request). The slave
+				would ACK OSDP_OUT but not release. */
+			err_status_f = 1;
+			
+			#if DEBUG_ALL || DEBUG_INTERLOCK
+			Print_Message("\nsAddress : ");
+			Print_Number(iLock.actionSlave);
+			Print_Message(" is not in normal state.");
+			#endif
+		}
 		if (iDeviceFlag[lclDevIdx].chk_ip_sts_after_itd == FLAG_SET)
 		{
 			/* below routine is to check input status of the doors after the ITD timer complete. */
@@ -352,6 +388,27 @@ void Process_Interlocking(void)
 				/* below routine is to check input status of the doors. */
 				U8 dvIdx = 0;
 		 		dvIdx = Find_Device_Index_InSystem(iLock.tx_address[idx]);
+				
+				if ((lcl_door_req_f == FLAG_SET) && (iLock.tx_address[idx] == iLock.actionSlave))
+				{
+					/* Requesting door was checked above. */
+					continue;
+				}
+				
+				if ((lcl_door_req_f == FLAG_SET) && (slv_data[dvIdx].oprtState == SLV_OP_STATE_DOOR_ACTIVE))
+				{
+					/*	An interlocked door is in its own release cycle. Releasing this
+						door now would break the interlock, and sending SET_INTERLOCK
+						would relock the other door in the middle of its cycle. */
+					#if DEBUG_ALL || DEBUG_INTERLOCK
+					Print_Message("\nsAddress : ");
+					Print_Number(inSysDeviceList[dvIdx].slv_addr);
+					Print_Message(" is in door active state.");
+					#endif
+					
+					err_status_f = 1;
+					break;
+				}
 			
 				if ((slv_data[dvIdx].oprtState == SLV_OP_STATE_NORMAL) || (slv_data[dvIdx].oprtState == SLV_OP_STATE_INTERLOCK))
 				{
@@ -430,6 +487,21 @@ void Process_Interlocking(void)
 				
 				iflags.command_in_process = FLAG_RST;
 			}
+			else if (lcl_door_req_f == FLAG_SET)
+			{
+				/*	Door request refused. Clear its flags: a door left with
+					executing_dr_request_f set blocks ITD completion of every door
+					(see end of this function) and keeps its group in interlock. */
+				iDeviceFlag[lclDevIdx].executing_dr_request_f = FLAG_RST;
+				iDeviceFlag[lclDevIdx].door_req_flag = FLAG_RST;
+				iflags.command_in_process = FLAG_RST;
+				osdp_app.gb_enable_poll = 1;
+				
+				#if DEBUG_ALL || DEBUG_INTERLOCK
+				Print_Message("\nDoor request refused for sAddress : ");
+				Print_Number(iLock.actionSlave);
+				#endif
+			}
 			else
 			{
 				/*Do nothing*/
@@ -466,10 +538,24 @@ void Process_Interlocking(void)
 				iDeviceFlag[lclDevIdx].itd_timer_running = FLAG_RST;
 				iDeviceFlag[lclDevIdx].is_action_dev_normal = FLAG_SET;
 				
+				/*	ITD is complete, so the release cycle of this door is over. Clear
+					any cycle flag still left, otherwise Reset_From_Interlock() sees
+					this door as active and keeps its interlocked doors locked. */
+				iDeviceFlag[lclDevIdx].executing_dr_request_f = FLAG_RST;
+				iDeviceFlag[lclDevIdx].door_req_flag = FLAG_RST;
+				iDeviceFlag[lclDevIdx].chk_slvdrActive_state = FLAG_RST;
+				iDeviceFlag[lclDevIdx].doorActiveState = FLAG_RST;
+				iDeviceFlag[lclDevIdx].chk_for_next_door_close = FLAG_RST;
+				
 				Reset_From_Interlock(iLock.actionSlave);
 				if (iLock.tx_length > 0)
 				{
 					Set_Flags_Put_Into_Normal(iLock.actionSlave);
+					
+					/*	The door is set to normal now. Its cached state was last read
+						during its release cycle (Door Active); without this the
+						DPS/LFB and aux input monitoring stay disabled for it. */
+					slv_data[lclDevIdx].oprtState = SLV_OP_STATE_NORMAL;
 				}
 				
 				#if DEBUG_ALL || DEBUG_INTERLOCK
@@ -498,8 +584,21 @@ void Process_Interlocking(void)
 			{
 				U8 dvIdx = Find_Device_Index_InSystem(iLock.actionSlave);
 				iDeviceFlag[dvIdx].ilock_by_device = FLAG_SET;
-				Set_Flags_Put_Into_Interlock(iLock.actionSlave);
 				
+				/*	The status read list also held the requesting door. Interlock only
+					its interlocked doors, selected with the states just read. */
+				Find_Main_iLock_Sequence_With(iLock.actionSlave);
+				Find_iLock_Sequence();
+				
+				if (iLock.tx_length > 0)
+				{
+					Set_Flags_Put_Into_Interlock(iLock.actionSlave);
+				}
+				else
+				{
+					/* No interlocked door to lock: release the door directly. */
+					Set_Flags_To_Send_OSDP_OUT();
+				}
 			}
 		}
 	}
@@ -547,6 +646,12 @@ void Process_Interlocking(void)
 			}
 		}
 	}
+	
+	/*	Start new sequences only after the completions above were handled, so a
+		request can not take over a sequence that is between two of its steps.
+		ITD completions above go first: they release interlocked groups. */
+	Serve_Door_Requests();
+	Supervise_Release_Cycles();
 }
 
 /*****************************************************************************
@@ -808,10 +913,7 @@ void Reset_From_Interlock(U8 slvAddress)
 	{
 		for (U8 tDevIdx = 0; tDevIdx < TOTAL_SLAVES; tDevIdx++)
 		{
-			if ((iDeviceFlag[tDevIdx].itd_timer_running == FLAG_SET)
-			|| (iDeviceFlag[tDevIdx].doorActiveState == FLAG_SET)
-			|| (iDeviceFlag[tDevIdx].chk_slvdrActive_state == FLAG_SET)
-			|| (iDeviceFlag[tDevIdx].executing_dr_request_f == FLAG_SET))
+			if (Is_Door_In_Release_Cycle(tDevIdx) == FLAG_SET)
 			{
 				Find_Main_iLock_Sequence_With(inSysDeviceList[tDevIdx].slv_addr);
 				Find_iLock_Sequence();
@@ -854,8 +956,8 @@ void Reset_From_Interlock(U8 slvAddress)
 		else
 		{
 			U8 dvIdx = Find_Device_Index_InSystem(iLock.rst_address[rstIdx]);
-			if ((slv_data[dvIdx].oprtState == SLV_OP_STATE_INTERLOCK)
-			|| (slv_data[dvIdx].oprtState == SLV_OP_STATE_NORMAL))
+			if ((Get_Effective_Oprt_State(dvIdx) == SLV_OP_STATE_INTERLOCK)
+			|| (Get_Effective_Oprt_State(dvIdx) == SLV_OP_STATE_NORMAL))
 			{
 				iLock.utx_address[fnlDevIdx++] = iLock.rst_address[rstIdx];
 				lclUpdateDevices = 1;
@@ -924,8 +1026,9 @@ void Find_iLock_Sequence(void)
 	for (U8 idx = 0; idx < iLock.tx_length; idx++)
 	{
 		U8 dvIdx = Find_Device_Index_InSystem(iLock.tx_address[idx]);
+		U8 lcl_state = Get_Effective_Oprt_State(dvIdx);
 		
-		if ((slv_data[dvIdx].oprtState == SLV_OP_STATE_INTERLOCK) || (slv_data[dvIdx].oprtState == SLV_OP_STATE_NORMAL))
+		if ((lcl_state == SLV_OP_STATE_INTERLOCK) || (lcl_state == SLV_OP_STATE_NORMAL))
 		{
 			iLock.tx_address[lcl_iIdx++] = iLock.tx_address[idx];
 		}
@@ -1142,7 +1245,7 @@ void Set_Flags_Put_Into_Normal(U8 slvAddress)
 	
 	if (slvAddress > 0)
 	{
-		U8 grpIdx = Find_Device_Group(iLock.actionSlave);
+		U8 grpIdx = Find_Device_Group(slvAddress);
 		grpData[grpIdx].command_executing_f = FLAG_SET;
 	}
 }
@@ -4109,16 +4212,48 @@ void Get_Door_Access(U8 slvAddress)
 	// Find the index of the device in the system based on its slave address
 	U8 devIdx = Find_Device_Index_InSystem(slvAddress);
 
-	// Check if the device is in normal operating state and no command is currently in process
-	if ((slv_data[devIdx].oprtState == SLV_OP_STATE_NORMAL)
-	&& (iflags.command_in_process == FLAG_RST))
+	/*	The cached operational state is not used here: it is not refreshed after
+		a door's own release cycle and can stay "Door Active" for ever. The
+		state of the requesting door is read below and checked when the read
+		completes (Process_Interlocking). */
+	if ((devIdx < TOTAL_SLAVES) && (iflags.command_in_process == FLAG_RST))
 	{
+		/*	Refuse if this door, or a door interlocked with it, is still in its own
+			release cycle (request, door active or ITD). */
+		if (Is_Door_In_Release_Cycle(devIdx) == FLAG_SET)
+		{
+			#if DEBUG_ALL || DEBUG_INTERLOCK
+			Print_Message("\nDoor request refused, release cycle active for sAddress : ");
+			Print_Number(slvAddress);
+			#endif
+			return;
+		}
+		
+		Find_Main_iLock_Sequence_With(slvAddress);
+		for (U8 idx = 0; idx < iLock.tx_length; idx++)
+		{
+			U8 mbrIdx = Find_Device_Index_InSystem(iLock.tx_address[idx]);
+			if (Is_Door_In_Release_Cycle(mbrIdx) == FLAG_SET)
+			{
+				#if DEBUG_ALL || DEBUG_INTERLOCK
+				Print_Message("\nDoor request of sAddress ");
+				Print_Number(slvAddress);
+				Print_Message(" refused, release cycle active for sAddress : ");
+				Print_Number(iLock.tx_address[idx]);
+				#endif
+				return;
+			}
+		}
+		
 		// Set flags to indicate door access request execution
 		iDeviceFlag[devIdx].executing_dr_request_f = FLAG_SET;
 		iLock.actionSlave = slvAddress;
-		Find_Main_iLock_Sequence_With(iLock.actionSlave);
-		Find_iLock_Sequence();
 		iDeviceFlag[devIdx].door_req_flag = FLAG_SET;
+		
+		/*	Read the status of every interlocked door and of the requesting door
+			itself. The cached operational states are not refreshed after
+			SET_INTERLOCK / OSDP_OUT, so they can not be used to select doors. */
+		iLock.tx_address[iLock.tx_length++] = slvAddress;
 
 		// Set flags to check IP status
 		Set_Flags_To_Check_IP_Status();
@@ -4126,9 +4261,273 @@ void Get_Door_Access(U8 slvAddress)
 		// Find the group index of the device and set flags to indicate command execution
 		U8 grpIdx = Find_Device_Group(iLock.actionSlave);
 		grpData[grpIdx].command_executing_f = FLAG_SET;
-		
-		/***** delete *****/
-		iflags.temp_f = 1;
+	}
+}
+
+/*****************************************************************************
+* Function name	: U8 Is_Door_In_Release_Cycle(U8 devIdx)
+* Returns		: U8 ---> 1 if the door is in its release cycle, else 0.
+* Arguments    	: U8 devIdx ---> Pass device index.
+* Description	: A door is in its release cycle from the door request until
+*				  its ITD is complete and its group was reset to normal. During
+*				  this time it holds its interlocked doors.
+* Notes			: NA.
+* Global Variables Affected : NA.
+*****************************************************************************/
+U8 Is_Door_In_Release_Cycle(U8 devIdx)
+{
+	if (devIdx >= TOTAL_SLAVES)
+	{
+		return 0;
+	}
+	
+	if ((iDeviceFlag[devIdx].executing_dr_request_f == FLAG_SET)
+	|| (iDeviceFlag[devIdx].door_req_flag == FLAG_SET)
+	|| (iDeviceFlag[devIdx].chk_slvdrActive_state == FLAG_SET)
+	|| (iDeviceFlag[devIdx].doorActiveState == FLAG_SET)
+	|| (iDeviceFlag[devIdx].chk_for_next_door_close == FLAG_SET)
+	|| (iDeviceFlag[devIdx].itd_timer_running == FLAG_SET)
+	|| (iDeviceFlag[devIdx].chk_for_normal_state == FLAG_SET)
+	|| (iDeviceFlag[devIdx].chk_ip_sts_after_itd == FLAG_SET))
+	{
+		return 1;
+	}
+	
+	return 0;
+}
+
+/*****************************************************************************
+* Function name	: U8 Get_Effective_Oprt_State(U8 devIdx)
+* Returns		: U8 ---> operational state to use when selecting doors.
+* Arguments    	: U8 devIdx ---> Pass device index.
+* Description	: slv_data[].oprtState is only updated by an op-state read. A
+*				  door read during its release cycle stays "Door Active" in the
+*				  cache after the cycle is over (the slave itself goes to
+*				  interlock and is then set to normal by the master). Such a
+*				  door was left out of the interlock and reset lists, so it was
+*				  never returned to normal. Once the master has no release
+*				  cycle running for the door, treat it as interlocked.
+* Notes			: NA.
+* Global Variables Affected : NA.
+*****************************************************************************/
+U8 Get_Effective_Oprt_State(U8 devIdx)
+{
+	if (devIdx >= TOTAL_SLAVES)
+	{
+		return GRP_STATE_CANT_DEFINE;
+	}
+	
+	if ((slv_data[devIdx].oprtState == SLV_OP_STATE_DOOR_ACTIVE)
+	&& (Is_Door_In_Release_Cycle(devIdx) == FLAG_RST))
+	{
+		return SLV_OP_STATE_INTERLOCK;
+	}
+	
+	return slv_data[devIdx].oprtState;
+}
+
+/*****************************************************************************
+* Function name	: void Start_Release_Cycle_Check(U8 slvAddress)
+* Returns		: Nothing.
+* Arguments    	: U8 slvAddress ---> Address of the released door.
+* Description	: Read the operational state of a released door. The result is
+*				  handled in Check_Release_Cycle_Result().
+* Notes			: Caller must own the command sequence (command_in_process).
+* Global Variables Affected : iLock.tx_address, iLock.tx_length, iflags.
+*****************************************************************************/
+void Start_Release_Cycle_Check(U8 slvAddress)
+{
+	U8 devIdx = Find_Device_Index_InSystem(slvAddress);
+	if (devIdx < TOTAL_SLAVES)
+	{
+		relCheckTick[devIdx] = xTaskGetTickCount();
+	}
+	
+	iLock.actionSlave = slvAddress;
+	iLock.tx_address[0] = slvAddress;
+	iLock.tx_length = 1;
+	iflags.chk_rel_cycle_f = FLAG_SET;
+	Set_Flags_To_Check_OPRT_Status();
+}
+
+/*****************************************************************************
+* Function name	: static void Check_Release_Cycle_Result(void)
+* Returns		: Nothing.
+* Arguments    	: None.
+* Description	: Called when the op-state read started by
+*				  Start_Release_Cycle_Check() is complete. While the slave
+*				  reports Door Active its cycle is running. Any other state
+*				  means the slave refused OSDP_OUT or has already finished and
+*				  relocked (its reports were missed): end the cycle so ITD runs
+*				  and the interlocked doors are returned to normal.
+* Notes			: NA.
+* Global Variables Affected : NA.
+*****************************************************************************/
+static void Check_Release_Cycle_Result(void)
+{
+	U8 devIdx = Find_Device_Index_InSystem(iLock.tx_address[0]);
+	if (devIdx >= TOTAL_SLAVES)
+	{
+		return;
+	}
+	
+	if ((iDeviceFlag[devIdx].door_req_flag == FLAG_RST)
+	|| (iDeviceFlag[devIdx].chk_slvdrActive_state == FLAG_RST))
+	{
+		/* Cycle already ended by an input status report. */
+		return;
+	}
+	
+	if (slv_data[devIdx].oprtState == SLV_OP_STATE_DOOR_ACTIVE)
+	{
+		/* Release cycle running on the slave. */
+		return;
+	}
+	
+	#if DEBUG_ALL || DEBUG_INTERLOCK
+	Print_Message("\nsAddress : ");
+	Print_Number(inSysDeviceList[devIdx].slv_addr);
+	Print_Message(" not in door active state, end its release cycle.");
+	#endif
+	
+	End_Release_Cycle(devIdx);
+}
+
+/*****************************************************************************
+* Function name	: void End_Release_Cycle(U8 devIdx)
+* Returns		: Nothing.
+* Arguments    	: U8 devIdx ---> Pass device index.
+* Description	: Release cycle of the door is over: start its ITD. When ITD
+*				  completes, Process_Interlocking() returns its group to normal.
+* Notes			: Does not touch the running command sequence.
+* Global Variables Affected : iDeviceFlag[devIdx], iLockDevice[devIdx].itdCounts.
+*****************************************************************************/
+void End_Release_Cycle(U8 devIdx)
+{
+	iDeviceFlag[devIdx].chk_slvdrActive_state = FLAG_RST;
+	iDeviceFlag[devIdx].door_req_flag = FLAG_RST;
+	iDeviceFlag[devIdx].doorActiveState = FLAG_RST;
+	
+	#if DEBUG_ALL || DEBUG_INTERLOCK
+	Print_Message("\nStart ITD timer for sAddress : ");
+	Print_Number(inSysDeviceList[devIdx].slv_addr);
+	#endif
+	
+	if (iflags.command_in_process == FLAG_RST)
+	{
+		osdp_app.gb_enable_poll = 1;
+	}
+	
+	iLockDevice[devIdx].itdCounts = 0;
+	iDeviceFlag[devIdx].itd_timer_running = FLAG_SET;
+	iDeviceFlag[devIdx].start_itd_time = FLAG_SET;
+}
+
+/*****************************************************************************
+* Function name	: static void Latch_Door_Request(U8 slvAddress)
+* Returns		: Nothing.
+* Arguments    	: U8 slvAddress ---> Address of the requesting door.
+* Description	: Store a door request. It is started by Serve_Door_Requests()
+*				  once no other command sequence is running, instead of being
+*				  dropped or started in the middle of another sequence.
+* Notes			: NA.
+* Global Variables Affected : doorReqPending, doorReqTick.
+*****************************************************************************/
+static void Latch_Door_Request(U8 slvAddress)
+{
+	U8 devIdx = Find_Device_Index_InSystem(slvAddress);
+	if ((slvAddress > 0) && (devIdx < TOTAL_SLAVES))
+	{
+		doorReqPending[devIdx] = FLAG_SET;
+		doorReqTick[devIdx] = xTaskGetTickCount();
+	}
+}
+
+/*****************************************************************************
+* Function name	: static void Serve_Door_Requests(void)
+* Returns		: Nothing.
+* Arguments    	: None.
+* Description	: Start the oldest stored door request when the bus is free.
+*				  Requests older than DOOR_REQ_HOLD_MS are dropped.
+* Notes			: NA.
+* Global Variables Affected : doorReqPending.
+*****************************************************************************/
+static void Serve_Door_Requests(void)
+{
+	portTickType now = xTaskGetTickCount();
+	
+	for (U8 devIdx = 0; devIdx < TOTAL_SLAVES; devIdx++)
+	{
+		if ((doorReqPending[devIdx] == FLAG_SET)
+		&& ((portTickType)(now - doorReqTick[devIdx]) > (DOOR_REQ_HOLD_MS / portTICK_RATE_MS)))
+		{
+			doorReqPending[devIdx] = FLAG_RST;
+			
+			#if DEBUG_ALL || DEBUG_INTERLOCK
+			Print_Message("\nDoor request expired for sAddress : ");
+			Print_Number(inSysDeviceList[devIdx].slv_addr);
+			#endif
+		}
+	}
+	
+	if ((No_Priority_Flags_Set() == FLAG_RST)
+	|| (iflags.ip_sts_read_success == FLAG_SET)
+	|| (iflags.opt_sts_read_success == FLAG_SET))
+	{
+		return;
+	}
+	
+	U8 oldestIdx = 0xFF;
+	portTickType oldestAge = 0;
+	for (U8 devIdx = 0; devIdx < TOTAL_SLAVES; devIdx++)
+	{
+		portTickType age = (portTickType)(now - doorReqTick[devIdx]);
+		if ((doorReqPending[devIdx] == FLAG_SET)
+		&& ((oldestIdx == 0xFF) || (age > oldestAge)))
+		{
+			oldestIdx = devIdx;
+			oldestAge = age;
+		}
+	}
+	
+	if (oldestIdx != 0xFF)
+	{
+		doorReqPending[oldestIdx] = FLAG_RST;
+		Get_Door_Access(inSysDeviceList[oldestIdx].slv_addr);
+	}
+}
+
+/*****************************************************************************
+* Function name	: static void Supervise_Release_Cycles(void)
+* Returns		: Nothing.
+* Arguments    	: None.
+* Description	: A slave reports its inputs only when they change. If an unlock
+*				  or relock report is lost, or the slave refused the release,
+*				  the master would wait for ever and keep the group interlocked.
+*				  Every REL_CYCLE_CHECK_MS read the op-state of such a door.
+* Notes			: NA.
+* Global Variables Affected : NA.
+*****************************************************************************/
+static void Supervise_Release_Cycles(void)
+{
+	if ((No_Priority_Flags_Set() == FLAG_RST)
+	|| (iflags.ip_sts_read_success == FLAG_SET)
+	|| (iflags.opt_sts_read_success == FLAG_SET))
+	{
+		return;
+	}
+	
+	portTickType now = xTaskGetTickCount();
+	
+	for (U8 devIdx = 0; devIdx < TOTAL_SLAVES; devIdx++)
+	{
+		if ((iDeviceFlag[devIdx].door_req_flag == FLAG_SET)
+		&& (iDeviceFlag[devIdx].chk_slvdrActive_state == FLAG_SET)
+		&& ((portTickType)(now - relCheckTick[devIdx]) >= (REL_CYCLE_CHECK_MS / portTICK_RATE_MS)))
+		{
+			Start_Release_Cycle_Check(inSysDeviceList[devIdx].slv_addr);
+			break;
+		}
 	}
 }
 
@@ -4520,7 +4919,7 @@ U8 Is_Device_Normal_And_Other_Flags_Reset(U8 devIdx, U8 grpIndx)
 *****************************************************************************/
 U8 Check_Any_DR_Command_Executing(U8 devIdx)
 {
-	if (((slv_data[devIdx].oprtState == SLV_OP_STATE_INTERLOCK) || (slv_data[devIdx].oprtState == SLV_OP_STATE_NORMAL))
+	if (((Get_Effective_Oprt_State(devIdx) == SLV_OP_STATE_INTERLOCK) || (Get_Effective_Oprt_State(devIdx) == SLV_OP_STATE_NORMAL))
 	&& ((iDeviceFlag[devIdx].executing_dr_request_f == FLAG_RST)
 	&& (iDeviceFlag[devIdx].doorActiveState == FLAG_RST)
 	&& (iDeviceFlag[devIdx].itd_timer_running == FLAG_RST)

@@ -230,6 +230,7 @@ extern FLAGS Flag;
 extern OSDP_INFO gb_osdp;
 
 extern volatile uint8_t gb_TransmitFrameBuffer[OSDP_TX_FRAME_SIZE], gb_ReceiveFrameBuffer[OSDP_TX_FRAME_SIZE];
+extern volatile uint8_t gb_last_tx_cmd;	// Command code of the last frame built for transmission.
 extern volatile uint8_t gb_receiving_f;	// Flag used to indicate that, RS485 data received completely.
 extern volatile uint8_t rcv_idx ;	// receive index OSDP frame_data
 extern volatile uint8_t rcv_f;		// Enable receive flag based on OSDP SOM command

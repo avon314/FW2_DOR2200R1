@@ -82,9 +82,7 @@ typedef struct
 	U8 chk_slvdrActive_state		: 1;
 	U8 doorActiveState				: 1;
 	U8 chk_itd_time_value			: 1;
-	U8 start_itd_time				: 1;
 	U8 itd_timer_running			: 1;
-	U8 itd_time_completed			: 1;
 	U8 chk_for_normal_state			: 1;
 	U8 put_into_normal_state		: 1;
 	U8 chk_normal_state_ack			: 1;
@@ -112,7 +110,13 @@ typedef struct
 	U8 recheck_nonIlock_ips_f		: 1;
 	U8 oprt_state_ax_ip_control_f	: 1;
 	U8 slv_in_prvc_N_pwr_UP			: 1;
+	U8 chk_rel_cycle_f				: 1;	/* Op-state read of a released door is in progress (iflags only). */
 	U8 ilock_by_device;
+	
+	/*	Written from the 1 ms timer ISR (Match_ITD_Counts). Kept out of the bit
+		fields so an ISR update is not lost in a task's read-modify-write. */
+	volatile U8 start_itd_time;
+	volatile U8 itd_time_completed;
 	
 	U8 temp_f;
 }ILCKFLAG;
@@ -221,4 +225,8 @@ U8 Count_Set_Bits(U16 data);
 U8 Fill_Array_With_iLock_Devices(U8* UpdArray, U8 lenUpArr, U8* oldArray, U8 lenOldArr);
 U8 Determine_Group_Operation_state(void);
 U8 Validate_Flags_For_OPRT_STS_AUX_IP_Control(U8 rcdvIdx, U8 rcgrpIdx);
+U8 Is_Door_In_Release_Cycle(U8 devIdx);
+U8 Get_Effective_Oprt_State(U8 devIdx);
+void Start_Release_Cycle_Check(U8 slvAddress);
+void End_Release_Cycle(U8 devIdx);
 #endif /* INTERLOCK_H_ */

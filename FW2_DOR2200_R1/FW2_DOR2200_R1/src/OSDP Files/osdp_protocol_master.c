@@ -33,6 +33,7 @@
 /***** End of Include Header Files *****/
 
 volatile uint8_t gb_TransmitFrameBuffer[OSDP_TX_FRAME_SIZE]; /*transmit buffer for OSDP frame_data*/
+volatile uint8_t gb_last_tx_cmd = CMD_OSDP_POLL;	/* Command code of the frame in gb_TransmitFrameBuffer. */
 volatile uint8_t gb_ReceiveFrameBuffer[OSDP_RX_FRAME_SIZE];	/*receive buffer for OSDP frame_data*/
 
 volatile uint8_t rcv_idx = 0;	// receive index OSDP frame_data
@@ -98,6 +99,7 @@ void OSDP_Frame_Build(uint8_t OSDP_CMD, uint8_t slave_address)
 
 	frame_idx = Fill_OSDP_Header(frame_idx, slave_address);
 	frame_idx = Update_OSDP_Control_ID(frame_idx);
+	gb_last_tx_cmd = OSDP_CMD;
 
 	switch (OSDP_CMD)
 	{
@@ -288,6 +290,7 @@ void OSDP_OUT_Frame_Build(uint8_t slave_address, uint8_t output_no, uint8_t cont
 
 	frame_idx = Fill_OSDP_Header(frame_idx, slave_address);
 	frame_idx = Update_OSDP_Control_ID(frame_idx);
+	gb_last_tx_cmd = CMD_OSDP_OUT;
 	
 	gb_TransmitFrameBuffer[frame_idx++] = CMD_OSDP_OUT;	// CONST_OSDP_OUT command.
 	gb_TransmitFrameBuffer[frame_idx++] = output_no;	// Output number (which output need to be updated).

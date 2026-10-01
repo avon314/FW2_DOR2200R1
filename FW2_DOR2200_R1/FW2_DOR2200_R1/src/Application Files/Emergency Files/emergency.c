@@ -245,12 +245,12 @@ void Clear_Whole_Group_Flags(void)
 {
 	// Backup the current flags and variables
 	memcpy(&copyiflags, &iflags, sizeof(ILCKFLAG));
-	memcpy(&copyiDeviceFlag, &iDeviceFlag, sizeof(ILCKFLAG));
+	memcpy(copyiDeviceFlag, iDeviceFlag, sizeof(iDeviceFlag));	// All devices, not only the first.
 	memcpy(&copyosdp_app, &osdp_app, sizeof(OSDP_APP));
 	
 	// Clear the current flags and variables
 	memset(&iflags, 0, sizeof(ILCKFLAG));
-	memset(&iDeviceFlag, 0, sizeof(ILCKFLAG));
+	memset(iDeviceFlag, 0, sizeof(iDeviceFlag));
 	memset(&osdp_app, 0, sizeof(OSDP_APP));
 	
 	// Refill the poll timer value
@@ -272,7 +272,7 @@ void ReAssign_Whole_Group_Flags(void)
 {
 	// Restore the flags and variables from the backup
 	memcpy(&iflags, &copyiflags, sizeof(ILCKFLAG));
-	memcpy(&iDeviceFlag, &copyiDeviceFlag, sizeof(ILCKFLAG));
+	memcpy(iDeviceFlag, copyiDeviceFlag, sizeof(iDeviceFlag));
 	memcpy(&osdp_app, &copyosdp_app, sizeof(OSDP_APP));
 	
 	// Iterate through all groups
