@@ -373,8 +373,30 @@ static U8   spiee_write(U32 addr, const U8 *data, U32 len);
 static U16  state_crc16(const U8 *data, U16 len);
 static void state_journal_load(void);
 
-#define SPIEE_SELECT()		pio_clear(SPIEE_CS_PORT, SPIEE_CS_PIN)
-#define SPIEE_DESELECT()	pio_set(SPIEE_CS_PORT, SPIEE_CS_PIN)
+/*	Chip select timing. On the V5 PCB the S pin is driven through R43 (10 kOhm
+	series resistor), which with the pin capacitance slows the S edges to a
+	few hundred ns. The M95P32 needs S high for tSHSL >= 50 ns between two
+	instructions, and WREN / PGWR are only executed on the S rising edge.
+	Without these delays the short S high pulse between WREN and PGWR was
+	filtered out, so the write enable latch was never set and every page
+	write was ignored. */
+#define SPIEE_CS_SETUP_US		(1u)	/* S low before the first clock */
+#define SPIEE_CS_HIGH_US		(2u)	/* S high time between instructions */
+#define M95P_SR_WEL				(0x02)	/* Status: write enable latch */
+#define M95P_CMD_RDCR			(0x15)	/* Read configuration and safety registers */
+
+static inline void SPIEE_SELECT(void)
+{
+	pio_clear(SPIEE_CS_PORT, SPIEE_CS_PIN);
+	delay_us(SPIEE_CS_SETUP_US);
+}
+
+static inline void SPIEE_DESELECT(void)
+{
+	/* Last byte is fully shifted (RDRF) before S goes high. */
+	pio_set(SPIEE_CS_PORT, SPIEE_CS_PIN);
+	delay_us(SPIEE_CS_HIGH_US);
+}
 
 /*****************************************************************************
 * Function name: static void spiee_init(void)
@@ -570,6 +592,21 @@ static U8 spiee_write(U32 addr, const U8 *data, U32 len)
 			spiee_xfer(M95P_CMD_WREN);
 			SPIEE_DESELECT();
 			
+			/* Check that write enable was accepted (WEL = 1). */
+			SPIEE_SELECT();
+			spiee_xfer(M95P_CMD_RDSR);
+			U8 status = spiee_xfer(0xFF);
+			SPIEE_DESELECT();
+			
+			if ((status & M95P_SR_WEL) == 0)
+			{
+				#if DEBUG_ALL || DEBUG_EXT_EEPROM
+				Print_Message("\nSPI EEPROM WREN not accepted, status : ");
+				Print_Number(status);
+				#endif
+				continue;
+			}
+			
 			SPIEE_SELECT();
 			spiee_cmd_addr(M95P_CMD_PGWR, addr);
 			for (U32 idx = 0; idx < chunk; idx++)
@@ -602,8 +639,25 @@ static U8 spiee_write(U32 addr, const U8 *data, U32 len)
 			ok = 0;
 			
 			#if DEBUG_ALL || DEBUG_EXT_EEPROM
+			/* Status (SRWD TB x BP2 BP1 BP0 WEL WIP) and safety register
+			   (PAMAF PUF ERF PRF ECC1C ECC2C ECC3D ECC3DS) for diagnosis. */
+			SPIEE_SELECT();
+			spiee_xfer(M95P_CMD_RDSR);
+			U8 sr = spiee_xfer(0xFF);
+			SPIEE_DESELECT();
+			SPIEE_SELECT();
+			spiee_xfer(M95P_CMD_RDCR);
+			U8 cr = spiee_xfer(0xFF);
+			U8 sf = spiee_xfer(0xFF);
+			SPIEE_DESELECT();
 			Print_Message("\nSPI EEPROM write/verify failed at address : ");
 			Print_Number(addr);
+			Print_Message(" SR=");
+			Print_Number(sr);
+			Print_Message(" CR=");
+			Print_Number(cr);
+			Print_Message(" SAFETY=");
+			Print_Number(sf);
 			#endif
 		}
 		
