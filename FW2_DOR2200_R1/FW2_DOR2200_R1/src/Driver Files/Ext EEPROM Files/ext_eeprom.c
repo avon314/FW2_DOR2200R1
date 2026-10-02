@@ -309,16 +309,20 @@ void eeprom_flush_state(void)
 /* lwIP port (sam4e_gmac.c) */
 extern void ethernetif_set_mac_address(const uint8_t *puc_mac);
 
-/***** M95P32 instructions (ST datasheet, SPI single I/O) *****/
+/***** M95P32 instructions (ST datasheet DS12964 Rev 6, Table 12) *****/
 #define M95P_CMD_WREN			(0x06)	/* Write enable */
 #define M95P_CMD_RDSR			(0x05)	/* Read status register */
-#define M95P_CMD_READ			(0x03)	/* Read data */
-#define M95P_CMD_PGWR			(0x02)	/* Page write (byte-alterable, 1..512 bytes) */
-#define M95P_CMD_RDID			(0x9F)	/* Read JEDEC identification */
-#define M95P_SR_WIP				(0x01)	/* Status: write in progress */
+#define M95P_CMD_READ			(0x03)	/* Read data, single output (max 50 MHz) */
+#define M95P_CMD_PGWR			(0x02)	/* Page write: auto erase + program of 1..512 bytes,
+										   other bytes of the page unchanged */
+#define M95P_CMD_JEDID			(0x9F)	/* JEDEC identification: 20h, 00h, 16h */
+#define M95P_SR_WIP				(0x01)	/* Status: write in progress (also set during power-up) */
 #define M95P_PAGE_SIZE			(512u)
-#define M95P_WRITE_TIMEOUT_US	(20000u)	/* Page write completes within a few ms */
+#define M95P_WRITE_TIMEOUT_US	(20000u)	/* tPW max 4.5 ms (Table 27) */
 #define M95P_SPI_CLOCK_HZ		(8000000u)
+#define M95P_JEDEC_MFR			(0x20)	/* ST */
+#define M95P_JEDEC_FAMILY		(0x00)	/* SPI family */
+#define M95P_JEDEC_DENSITY		(0x16)	/* 32 Mbit */
 
 /***** Pins *****/
 #define SPIEE_CS_PORT			(PIOA)
@@ -400,15 +404,20 @@ static void spiee_init(void)
 	spi_configure_cs_behavior(SPI, SPIEE_SPI_NPCS, SPI_CS_KEEP_LOW);
 	spi_enable(SPI);
 	
-	delay_ms(1);	/* Power-up time of the memory after VCC is stable */
+	delay_ms(1);	/* tVSL: 30 us min from VCC(min) to S low (Table 15) */
 	
-	#if DEBUG_ALL || DEBUG_EXT_EEPROM
+	/*	WIP is 1 while the device completes its power-up. If power-up failed (PUF)
+		the status register reads FFh and this times out. */
+	U8 powered_up = spiee_wait_ready();
+	
 	SPIEE_SELECT();
-	spiee_xfer(M95P_CMD_RDID);
+	spiee_xfer(M95P_CMD_JEDID);
 	U8 id0 = spiee_xfer(0xFF);
 	U8 id1 = spiee_xfer(0xFF);
 	U8 id2 = spiee_xfer(0xFF);
 	SPIEE_DESELECT();
+	
+	#if DEBUG_ALL || DEBUG_EXT_EEPROM
 	Print_Message("\nSPI EEPROM JEDEC ID : ");
 	Print_Number(id0);
 	Print_Message(",");
@@ -417,7 +426,20 @@ static void spiee_init(void)
 	Print_Number(id2);
 	#endif
 	
-	spiee_ready = 1;
+	/*	Use the memory only if it answers as an M95P32. Otherwise reads return
+		FFh (configuration CRC fails, defaults are used) and writes are skipped. */
+	if ((powered_up == 1) && (id0 == M95P_JEDEC_MFR) && (id1 == M95P_JEDEC_FAMILY) && (id2 == M95P_JEDEC_DENSITY))
+	{
+		spiee_ready = 1;
+	}
+	else
+	{
+		spiee_ready = 0;
+		
+		#if DEBUG_ALL || DEBUG_EXT_EEPROM
+		Print_Message("\nSPI EEPROM not found, configuration and state are not stored.");
+		#endif
+	}
 }
 
 /*****************************************************************************
