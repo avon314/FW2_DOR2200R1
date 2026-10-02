@@ -162,19 +162,30 @@ void test_grp_fire_detect(void)
 *****************************************************************************/
 void Check_EMG_Input_Detection(void)
 {
+     /*	The emergency stays active for as long as the input is in its active
+		state. It is reset only when the input returns to its normal state.
+		(Previously a 5 s timer in the timer ISR raised the reset by itself, so
+		the system left emergency while the field switch was still operated, and
+		the real return of the input was ignored.) */
      if((digInput.ip2_htl_f == FLAG_SET) && (control_emg_pin_detect == FLAG_RST))    // Check if input 2 high-to-low flag is set and emergency flag is not set.
      {
-          emg_ip_time_count = 0;                                              // Reset the timer count and start the timer.
-          emg_ip_timer_start_f = FLAG_SET;
           control_emg_pin_detect = FLAG_SET;                                 // Set emergency flag.
 		  gb_ip_emg_detected_f = FLAG_SET;
 		  gb_ip_emg_reset_f = FLAG_RST;
      }
 	 else if ((digInput.ip2_htl_f == FLAG_RST) && (control_emg_pin_detect == FLAG_SET))
 	 {
-		 emg_ip_time_count = 0;
-		 emg_ip_timer_start_f = FLAG_RST;
 		 control_emg_pin_detect = FLAG_RST;
+		 
+		 if (gb_ip_emg_detected_f == FLAG_SET)
+		 {
+			 /* Emergency was not started yet (bus was busy): cancel it. */
+			 gb_ip_emg_detected_f = FLAG_RST;
+		 }
+		 else
+		 {
+			 gb_ip_emg_reset_f = FLAG_SET;	/* Input back to normal: reset the emergency. */
+		 }
 	 }
 
 //      else if((digInput.ip2_lth_f) && (emg_ip_time_count<IP_EMG_RST_TIME))      // Check if input 2 low-to-high flag is set and timer count is less than Emergency Reset Time.

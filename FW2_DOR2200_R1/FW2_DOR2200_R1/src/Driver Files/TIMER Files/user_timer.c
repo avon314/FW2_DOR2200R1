@@ -265,17 +265,10 @@ void TC0_Handler(void)
 		OSDP_Frame_Response_Time();	/* Decrements osdp frame receive time value & sets the frame not receive flag */
 		Interlock_Time_Delay();		/* ITD timer values are to be checked in this function for defined devices. */
 		
-		if (emg_ip_timer_start_f == FLAG_SET)
-		{
-			emg_ip_time_count ++;
-			if (emg_ip_time_count >= IP_EMG_RST_TIME)
-			{
-				emg_ip_time_count = 0;
-				emg_ip_timer_start_f = FLAG_RST;
-				gb_ip_emg_detected_f = FLAG_RST;
-				gb_ip_emg_reset_f = FLAG_SET;
-			}
-		}
+		/*	The emergency input is no longer reset by a timer here: it raised the
+			reset 5 s after activation although the input was still active, and
+			cleared a pending activation that was waiting for the bus. The reset
+			now comes from the input itself (Check_EMG_Input_Detection()). */
 		
 		if(IS_BIT_SET(gb_op_mom_timer_running, OP_1_IDX))      // Timer for output 1.
 			gb_op_mom_timer[OP_1_IDX]++;
