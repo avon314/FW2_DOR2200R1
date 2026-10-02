@@ -130,14 +130,18 @@ extern void Read_Memory_For_PowerON_State(void);
  *****************************************************************************/
  void exit_config_mode(void)
  {
+	/*	Write the configuration while gb_config_mode_f is still set. Clearing it
+		first restarted the application in General_Task (higher priority) in
+		the middle of this write; its EEPROM accesses then interleaved with the
+		configuration write and corrupted it. */
+	write_config_eeprom();                            // Write all configuration data to EEPROM.
+
      gb_config_mode_f = false;                         // Exit configuration mode by reseting configuration mode flag and connect with device flag.
      gb_conn_dvc_f = false;
 
      #if DEBUG_ALL || DEBUG_CONFIG_MODE
      Print_Message("\nOut of configuration mode.");
      #endif
-
-	write_config_eeprom();                            // Write all configuration data to EEPROM.
 
 	gb_device_power_on = 1;
 	ON_RED_LED;

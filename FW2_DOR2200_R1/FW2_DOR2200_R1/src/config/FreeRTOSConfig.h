@@ -102,6 +102,7 @@ to exclude the API function. */
 #define INCLUDE_vTaskSuspend            0
 #define INCLUDE_vTaskDelayUntil         0
 #define INCLUDE_vTaskDelay              1
+#define INCLUDE_xTaskGetSchedulerState  1	/* Used by the SPI EEPROM driver (ext_eeprom.c) */
 
 /* FreeRTOS+CLI definitions. */
 /* Dimensions a buffer into which command outputs can be written. The buffer

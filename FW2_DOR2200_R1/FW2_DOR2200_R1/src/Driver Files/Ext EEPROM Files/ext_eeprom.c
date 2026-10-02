@@ -363,6 +363,8 @@ static U32 stateLastFlushTick = 0;
 static U8  spiee_ready = 0;
 
 static void spiee_init(void);
+static U8   spiee_lock(void);
+static void spiee_unlock(U8 locked);
 static U8   spiee_xfer(U8 byte);
 static void spiee_cmd_addr(U8 cmd, U32 addr);
 static U8   spiee_wait_ready(void);
@@ -439,6 +441,33 @@ static void spiee_init(void)
 		#if DEBUG_ALL || DEBUG_EXT_EEPROM
 		Print_Message("\nSPI EEPROM not found, configuration and state are not stored.");
 		#endif
+	}
+}
+
+/*****************************************************************************
+* Function name: static U8 spiee_lock(void) / static void spiee_unlock(U8 locked)
+* Description	: The EEPROM is used from several tasks (configuration save in the
+*				  CONFIG_MODE task, power-on state and default IP key in
+*				  General_Task). A task switch in the middle of an SPI command
+*				  sequence would interleave two commands on the bus, so task
+*				  switching is suspended for each EEPROM operation. Interrupts
+*				  stay enabled. Before the scheduler starts nothing is needed.
+*****************************************************************************/
+static U8 spiee_lock(void)
+{
+	if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+	{
+		vTaskSuspendAll();
+		return 1;
+	}
+	return 0;
+}
+
+static void spiee_unlock(U8 locked)
+{
+	if (locked)
+	{
+		xTaskResumeAll();
 	}
 }
 
@@ -666,7 +695,9 @@ void eeprom_flush_state(void)
 	memcpy(rec.data, stateWin, sizeof(rec.data));
 	rec.crc = state_crc16((const U8 *)&rec, sizeof(rec) - sizeof(rec.crc));
 	
+	U8 locked = spiee_lock();
 	spiee_write(STATE_JRNL_BASE + ((U32)slot * STATE_REC_SIZE), (const U8 *)&rec, sizeof(rec));
+	spiee_unlock(locked);
 	
 	/*	Advance even if the write failed: the next save uses a fresh slot and the
 		newest valid record is still found at power on. */
@@ -697,6 +728,8 @@ void eeprom_pin_config(void)
 *****************************************************************************/
 void eeprom_write_frame(uint16_t address, uint8_t *data, uint16_t length)
 {
+	U8 locked = spiee_lock();
+	
 	while (length > 0)
 	{
 		if ((address >= STATE_WIN_BASE) && (address < (STATE_WIN_BASE + STATE_WIN_SIZE)))
@@ -730,6 +763,8 @@ void eeprom_write_frame(uint16_t address, uint8_t *data, uint16_t length)
 			length -= n;
 		}
 	}
+	
+	spiee_unlock(locked);
 }
 
 /*****************************************************************************
@@ -738,6 +773,8 @@ void eeprom_write_frame(uint16_t address, uint8_t *data, uint16_t length)
 *****************************************************************************/
 void eeprom_read_frame(uint16_t address, uint8_t *data, uint16_t length)
 {
+	U8 locked = spiee_lock();
+	
 	while (length > 0)
 	{
 		if ((address >= STATE_WIN_BASE) && (address < (STATE_WIN_BASE + STATE_WIN_SIZE)))
@@ -767,6 +804,8 @@ void eeprom_read_frame(uint16_t address, uint8_t *data, uint16_t length)
 			length -= n;
 		}
 	}
+	
+	spiee_unlock(locked);
 }
 
 void eeprom_write_byte(uint16_t addr, uint8_t data)
@@ -789,6 +828,7 @@ void erase_eeprom(void)
 {
 	U8 blank[64];
 	memset(blank, 0xFF, sizeof(blank));
+	U8 locked = spiee_lock();
 	
 	for (U32 addr = 0; addr < STATE_WIN_BASE; addr += sizeof(blank))
 	{
@@ -800,6 +840,7 @@ void erase_eeprom(void)
 		spiee_write(STATE_JRNL_BASE + (slot * STATE_REC_SIZE), blank, STATE_REC_SIZE);
 	}
 	state_journal_load();
+	spiee_unlock(locked);
 }
 
 /*****************************************************************************
