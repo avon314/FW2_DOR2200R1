@@ -34,6 +34,7 @@
 #include "onboard_key.h"
 #include "config_mode.h"
 #include "ext_eeprom.h"
+#include "definitions.h"
 
 /**************************************/
 #include "ethernet.h"
@@ -67,7 +68,10 @@ void Driver_Initialization(void)
 	RS485_UART_Init();				/* Initialization of USART0 for RS485 communication. */
 	RS485_Driver_Init();			/* Initialization of RS485 Driver. */
 	configure_twi();                /* Configure twi(i2c) to write data to eeprom. */
-	eeprom_pin_config();            /* Configure pin used for eeprom write protect. */
+	eeprom_pin_config();            /* V3: eeprom write protect pin. V5: SPI EEPROM and power-on state. */
+#if (BOARD_HW_VERSION == 5)
+	eeprom_load_mac_address();      /* Use the EUI-48 of the AT24MAC402 as MAC address. */
+#endif
 	enter_config_mode();            // Enter configuration mode.
 	init_ethernet();				/* Configure the Ethernet driver */
 	Configure_WDT();				/* Configure 3 sec's of WDT timer to prevent the software stuck. */

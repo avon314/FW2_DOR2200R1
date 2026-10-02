@@ -385,6 +385,9 @@ void Master_General_Purpose_Mem_Handling(void)
 		U8 FIRE_RESET = 0;
 		eeprom_write_frame(GEN_MEM_FIRE_STATE, &FIRE_RESET, 1);
 	}
+	
+	/* V5: save the power-on state (kept in RAM) to the SPI EEPROM. No-op on V3. */
+	eeprom_flush_state();
 }
 
 /*****************************************************************************

@@ -23,7 +23,9 @@
 #define WRITE_PROTECT_PIN     (PIO_PA5)                                         // Pin used for write protect in eeprom.
 
 
-#define EEPROM_ADDR           (0x50)                                            // Address of AT24C64 EEPROM.
+/*	Configuration layout granularity used by app_eeprom.c. It is kept for both
+	hardware versions so the configuration addresses stay the same. */
+#define EEPROM_ADDR           (0x50)                                            // I2C address of U4 (AT24MAC402) EEPROM array.
 #define PAGE_SIZE             (32)                                              // Page size in bytes.
 #define MAX_FRAME_SIZE        (256)                                             // Maximum frame size to write or read.
 #define DATA_SIZE             (PAGE_SIZE * MAX_FRAME_SIZE)                      // Total data size to write or read.
@@ -37,5 +39,7 @@ void eeprom_write_frame(uint16_t address, uint8_t *data, uint16_t length);
 void eeprom_read_frame(uint16_t address, uint8_t *data, uint16_t length);
 void erase_eeprom(void);
 void read_cplt_eeprom(void);
+void eeprom_flush_state(void);
+void eeprom_load_mac_address(void);
 
 #endif /* EXT_EEPROM_H_ */

@@ -41,6 +41,7 @@
 #include "netif/etharp.h"
 
 err_t ethernetif_init(struct netif *netif);
+void ethernetif_set_mac_address(const uint8_t *puc_mac);
 
 void ethernetif_input(struct netif *netif);
 

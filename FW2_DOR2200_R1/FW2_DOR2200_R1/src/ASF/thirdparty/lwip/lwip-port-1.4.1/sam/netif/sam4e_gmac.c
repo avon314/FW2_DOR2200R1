@@ -132,6 +132,15 @@ static uint8_t gs_uc_mac_address[] =
 	ETHERNET_CONF_ETHADDR5
 };
 
+/**
+ * \brief Replace the default MAC address (conf_eth.h), e.g. with the EUI-48
+ * read from the board's MAC-ID EEPROM. Call before ethernetif_init().
+ */
+void ethernetif_set_mac_address(const uint8_t *puc_mac)
+{
+	memcpy(gs_uc_mac_address, puc_mac, sizeof(gs_uc_mac_address));
+}
+
 #if LWIP_STATS
 /** Used to compute lwIP bandwidth. */
 uint32_t lwip_tx_count = 0;

@@ -18,6 +18,14 @@
 #ifndef DEFINITIONS_H_
 #define DEFINITIONS_H_
 
+/***** Target hardware *****/
+/*	5 : PCB LTPL-0823-147-V5. Configuration and power-on state are stored in
+		the M95P32 SPI page EEPROM (U16, CS2 = PA16, W = PA21). The MAC
+		address is read from the AT24MAC402 EUI-48 (U4, I2C).
+	3 : PCB LTPL-0823-147-V3. Original storage on the I2C EEPROM (U4) and
+		fixed MAC address from conf_eth.h, as in the accepted V3 firmware. */
+#define BOARD_HW_VERSION	(5)
+
 /***** User defined Definitions *****/
 #define uTRUE		(1)
 #define uFALSE		(0)
