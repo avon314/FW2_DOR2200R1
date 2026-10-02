@@ -368,6 +368,8 @@ static void spiee_unlock(U8 locked);
 static U8   spiee_xfer(U8 byte);
 static void spiee_cmd_addr(U8 cmd, U32 addr);
 static U8   spiee_wait_ready(void);
+static U8   spiee_read_status(void);
+static void spiee_clear_protection(void);
 static void spiee_read(U32 addr, U8 *data, U32 len);
 static U8   spiee_write(U32 addr, const U8 *data, U32 len);
 static U16  state_crc16(const U8 *data, U16 len);
@@ -383,6 +385,8 @@ static void state_journal_load(void);
 #define SPIEE_CS_SETUP_US		(1u)	/* S low before the first clock */
 #define SPIEE_CS_HIGH_US		(2u)	/* S high time between instructions */
 #define M95P_SR_WEL				(0x02)	/* Status: write enable latch */
+#define M95P_CMD_WRSR			(0x01)	/* Write status register */
+#define M95P_SR_PROTECT_BITS	(0xDC)	/* SRWD, TB, BP2, BP1, BP0 */
 #define M95P_CMD_RDCR			(0x15)	/* Read configuration and safety registers */
 
 static inline void SPIEE_SELECT(void)
@@ -454,6 +458,7 @@ static void spiee_init(void)
 		FFh (configuration CRC fails, defaults are used) and writes are skipped. */
 	if ((powered_up == 1) && (id0 == M95P_JEDEC_MFR) && (id1 == M95P_JEDEC_FAMILY) && (id2 == M95P_JEDEC_DENSITY))
 	{
+		spiee_clear_protection();
 		spiee_ready = 1;
 	}
 	else
@@ -464,6 +469,68 @@ static void spiee_init(void)
 		Print_Message("\nSPI EEPROM not found, configuration and state are not stored.");
 		#endif
 	}
+}
+
+/*****************************************************************************
+* Function name: static U8 spiee_read_status(void)
+* Description	: Read the status register (SRWD TB x BP2 BP1 BP0 WEL WIP).
+*****************************************************************************/
+static U8 spiee_read_status(void)
+{
+	SPIEE_SELECT();
+	spiee_xfer(M95P_CMD_RDSR);
+	U8 status = spiee_xfer(0xFF);
+	SPIEE_DESELECT();
+	return status;
+}
+
+/*****************************************************************************
+* Function name: static void spiee_clear_protection(void)
+* Description	: Make the whole array writable. With BP2..BP0 = 111 (as found on
+*				  the first V5 boards: SR = 9Eh) all 4 MB are protected and every
+*				  page write is refused (safety register PAMAF/ERF/PRF set).
+*				  The status register is nonvolatile, so it is only rewritten
+*				  when a protection bit is set. This needs W (WR_PRT, PA21) high:
+*				  with SRWD = 1 and W low the register is hardware protected.
+*****************************************************************************/
+static void spiee_clear_protection(void)
+{
+	U8 status = spiee_read_status();
+	
+	if ((status & M95P_SR_PROTECT_BITS) == 0)
+	{
+		return;
+	}
+	
+	#if DEBUG_ALL || DEBUG_EXT_EEPROM
+	Print_Message("\nSPI EEPROM block protection set, status : ");
+	Print_Number(status);
+	#endif
+	
+	SPIEE_SELECT();
+	spiee_xfer(M95P_CMD_WREN);
+	SPIEE_DESELECT();
+	
+	SPIEE_SELECT();
+	spiee_xfer(M95P_CMD_WRSR);
+	spiee_xfer(0x00);		/* SRWD = 0, TB = 0, BP2..BP0 = 000: nothing protected */
+	SPIEE_DESELECT();
+	
+	spiee_wait_ready();		/* tWSCR max 9 ms */
+	
+	status = spiee_read_status();
+	
+	#if DEBUG_ALL || DEBUG_EXT_EEPROM
+	if ((status & M95P_SR_PROTECT_BITS) == 0)
+	{
+		Print_Message("\nSPI EEPROM protection cleared, status : ");
+	}
+	else
+	{
+		Print_Message("\nSPI EEPROM protection NOT cleared (W pin low?), status : ");
+	}
+	Print_Number(status);
+	#endif
 }
 
 /*****************************************************************************
